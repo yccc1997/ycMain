@@ -186,7 +186,7 @@ function RoleManager.LateUpdate()
     if roles then
         for _, v in pairs(roles) do
             if v then
-                v:LateUpdate()
+                v:acccclalal_xxxLateUpdate()
             end
         end
     end
