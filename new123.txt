@@ -1,1 +1,710 @@
-123456_lalalal2022年10月11日17:07:16
+require "GamePlay/Role/Role"
+require "GamePlay/Role/Monster"
+require "GamePlay/Role/NPC"
+require "GamePlay/Role/Player"
+require "GamePlay/Role/Me"
+require "GamePlay/Role/Pet"
+require 'GamePlay/Role/Head/RoleHead3DMesh'
+require "GamePlay/Role/Head/PlayerHead"
+require "GamePlay/Role/Head/PlayerHead3DMesh"
+require 'GamePlay/Role/Head/MountHead3DMesh'
+require "GamePlay/Role/Head/StatueHead3DMesh"
+require 'GamePlay/Role/Head/MeHead3DMesh'
+require "GamePlay/Role/Head/MonsterHead3DMesh"
+require 'GamePlay/Role/Head/NpcHead3DMesh'
+require "GamePlay/Role/RoleTouch/RoleTouch"
+require "GamePlay/Role/RoleEquip"
+require "GamePlay/Role/MountEquip"
+require "GamePlay/Role/NpcTaskTag"
+require "GamePlay/Role/RevealPlayer"
+require "GamePlay/Role/ViewRole"
+require "GamePlay/Role/ShopRole"
+require "GamePlay/Role/UIMonster"
+require "GamePlay/Role/Darkspirit"
+--require 'GameConst/RoleEnum'
+
+
+RoleManager = {
+    me,
+}
+local this = RoleManager
+
+local roles = {}
+
+function RoleManager.Init()
+    this.InitRolesRootGo()
+
+    this.TouchInit()
+end
+
+function RoleManager.InitRolesRootGo()
+    this.root = CS.UnityEngine.GameObject("RoleManager").transform
+    CS.UnityEngine.Object.DontDestroyOnLoad(this.root)
+    this.damageRoot = CS.UnityEngine.GameObject("DamageRoot").transform
+    CS.UnityEngine.Object.DontDestroyOnLoad(this.damageRoot)
+end
+
+function RoleManager.OnEnterGame()
+    this.RegistEvents()
+end
+
+function RoleManager.OnLeaveGame()
+    if this.eventContainer then
+        this.eventContainer:UnRegistAll()
+    end
+    this.DestroyRoles()
+end
+
+function RoleManager.Update()
+    if roles then
+        for _, v in pairs(roles) do
+            if v then
+                v:Update()
+            end
+        end
+    end
+end
+
+function RoleManager.InitMe(me)
+    if roles[me.id] then
+        return
+    end
+    this.me = me
+    this.me:UpdateInfo()
+    roles[me.id] = me
+    CS.Framework.SceneArea.AddObject(this.me.transform)
+    this.me.gameObject:AddComponent(typeof(CS.GpuGrass.GpuGrassPlayer))
+    SkillData.CreateCareerSkillInfos()
+
+    EventManager.Dispatch(Event.Role_OnMeCreated, me)
+end
+
+function RoleManager.CreateMonster(monsterData)
+    if(roles[monsterData.id]) then
+        --logError(string.format('怪物%d已在视野内,再次进入了视野',monsterData.id))
+        return
+    end
+
+    local role = Monster(monsterData)
+    if role.master and role.master ~= 0 and role.master == RoleManager.me.id then
+        RoleManager.me.summonMonster = role
+    end
+    roles[monsterData.id] = role
+    AudioManager.PlayMusicClipById(AudioUtility.GetMonsterAudioSound("bornSound", monsterData.model))
+    EventManager.Dispatch(Event.Role_OnRoleCreated, role)
+    return roles[monsterData.id]
+end
+
+function RoleManager.CreatePlayer(playerData)
+    if(roles[playerData.id]) then
+        --logError(string.format('玩家%d已在视野内,再次进入了视野',playerData.id))
+        return
+    end
+    if RedFortData.InRedFortActivity then
+        playerData.model,playerData.modelScale=ERoleModelName.default,PlayerModelDefaultScale
+    else
+        playerData.model,playerData.modelScale=RoleEquipUtility.GetCurPlayerModelName(playerData.appearData,playerData.equipsData.Data)
+    end
+    local role = Player(playerData)
+    role.oldPKModeValue = playerData.PKMode
+    roles[role.id] = role
+    role:UpdateInfo()
+    EventManager.Dispatch(Event.Role_OnRoleCreated, role)
+    if UIManager.IsVisible("Instance_GoalUI") then
+        EventManager.Dispatch(Event.CallBack_UpdateMemberInfo)
+    end
+    if role.data.rideMultiPlayersMount and not role.data.multiPlayersMountOwner then
+        role:MoreMountRoleModelSet(nil,role,false)
+    end
+    if not playerData.multiPlayersMountOwner and playerData.rideMultiPlayersMount then
+        for pos, roleId in pairs(playerData.multiPlayers) do
+            local roleMaster = RoleManager.GetRoleById(roleId)
+            if  roleMaster and roleMaster.AvatarMountEquip then
+                roleMaster.AvatarMountEquip:MountRoleSet()
+            end
+        end
+    end
+    return roles[role.id]
+end
+
+function RoleManager.CreateNpc(npcData)
+    if(roles[npcData.id]) then
+        --logError(string.format('NPC%d已在视野内,再次进入了视野',npcData.id))
+        return
+    end
+    local npc =  NPC(npcData)
+    roles[npc.id] = npc
+    EventManager.Dispatch(Event.Role_OnRoleCreated, npc)
+    return npc
+end
+
+function RoleManager.CancelClickNpc()
+    local npc = RoleManager.GetRoleListByType(ERoleType.NPC)
+    for k, v in pairs(npc.list) do
+        if not RoleManager.me then return end
+        local MeTargetAvatar = RoleManager.me.TargetAvatar
+        if(MeTargetAvatar and MeTargetAvatar.RoleType == ERoleType.NPC and
+                MeTargetAvatar.data.id == v.data.id) then
+            if v.model and v.model.modelObject then
+                CS.Framework.MaterialChange.DisAttachOutLine(v.model.modelObject)
+            end
+            RoleManager.me:SetTargetAvatar(nil)
+            EventManager.Dispatch(Event.CloseNpcPanel,v.data.config_Npc)
+        end
+    end
+end
+
+function RoleManager.RoleOnArrive()
+    local npc = RoleManager.GetRoleListByType(ERoleType.NPC)
+    local openNpcList = { }
+    local closeNpcList = { }
+    for k, v in pairs(npc.list) do
+        local distance = Vector2.DistancePow(v.cellPos,this.GetHostRole(this.me).cellPos)
+        if(distance <= 4) then
+            table.insert(openNpcList, v.id)
+        end
+        if(distance >= 9) then
+            table.insert(closeNpcList, v.id)
+        end
+    end
+    EventManager.Dispatch(Event.OpenNpcInteractionPanel,openNpcList)
+    EventManager.Dispatch(Event.CloseNpcInteractionPanel,closeNpcList)
+end
+
+function RoleManager.GetNpcByConfigId(configId)
+    for k, v in pairs(roles) do
+        if v and v.RoleType ==  ERoleType.NPC and not v.isMe then
+            if v.data.config_Npc and v.data.config_Npc.npcId == tonumber(configId) then
+               return v
+            end
+        end
+    end
+    return nil
+end
+
+function RoleManager.LateUpdate()
+    if roles then
+        for _, v in pairs(roles) do
+            if v then
+                v:LateUpdate()
+            end
+        end
+    end
+end
+
+--tip:怪物死亡时，服务器做了延时退出视野处理
+function RoleManager.DestroyRole(id)
+    local role = roles[id]
+    --assert(role)
+    if(role)then
+        if this.me.TargetAvatar ~= nil and this.me.TargetAvatar.id == role.id then
+            this.me:SetTarget(nil)
+        end
+        if RoleManager.me.AttackTargetAvatar ~= nil and RoleManager.me.AttackTargetAvatar.id == role.id then
+            RoleManager.me:SetAttackTargetAvatar(nil)
+        end
+        if role.RoleType == ERoleType.Monster then
+            if role.master and role.master ~= 0 and role.master == RoleManager.me.id then
+                RoleManager.me.summonMonster = nil
+            end
+            local monsterConfig = ConfigManager.GetConfig("cfg_Monster_monster", role.configId, "id")
+            if monsterConfig.reliveType ~= MonsterReliveType.Immediately then
+                role:Destroy()
+            elseif role.hp > 0 then
+                role:Destroy()
+            end
+        else
+            role:Destroy()
+        end
+    end
+    roles[id] = nil
+end
+
+function RoleManager.DestroyRolesInReconnectState()
+    if this.eventContainer then
+        this.eventContainer:UnRegistAll()
+    end
+    for k, v in pairs(roles) do
+        if v and not v.isMe then
+            this.DestroyRole(v.id)
+        end
+    end
+end
+
+function RoleManager.DestroyOtherRoles()
+    for k, v in pairs(roles) do
+        if v and not v.isMe then
+            this.DestroyRole(v.id)
+        end
+    end
+end
+
+function RoleManager.DestroyRoles()
+    for k, v in pairs(roles) do
+        v:OnCancelTouch()
+        v:Destroy()
+    end
+    roles = {}
+    this.me = nil
+
+end
+
+--------------------------------------------------------------------------------
+-- events
+function RoleManager.RegistEvents()
+    this.eventContainer = EventContainer(EventManager)
+
+    this.eventContainer:Regist(Event.Role_OnRoleEnterView, this.OnRoleEnterView)
+    this.eventContainer:Regist(Event.GameObject_OnGameObjectLeaveView, this.OnRoleLeaveView)
+    this.eventContainer:Regist(Event.Role_OnRefreshRoleData, this.OnRefreshRoleData)
+
+    this.eventContainer:Regist(Event.Role_OnRoleServerPosChanged, this.OnRoleServerPosChanged)
+
+    this.eventContainer:Regist(Event.Map_ChangeMap, this.OnChangeScene)
+
+    this.eventContainer:Regist(Event.Role_RefreshHp, this.OnRoleHpChanged)
+    this.eventContainer:Regist(Event.Role_RefreshMp, this.OnRoleMpChanged)
+    this.eventContainer:Regist(Event.Role_RefreshShield, this.OnRoleShieldChanged)
+    this.eventContainer:Regist(Event.Role_RefreshMaxTempShield, this.OnRoleMaxTempShieldChanged)
+    this.eventContainer:Regist(Event.Role_RefreshTempShield, this.OnRoleTempShieldChanged)
+    this.eventContainer:Regist(Event.Role_RefreshMountMaxHP, this.OnRoleMountMaxHPChanged)
+    this.eventContainer:Regist(Event.Role_RefreshMountHP, this.OnRoleMountHPChanged)
+    this.eventContainer:Regist(Event.Role_RefreshName, this.OnRoleNameChanged)
+    this.eventContainer:Regist(Event.Role_RefreshUnion, this.OnRoleRefreshUnion)
+    this.eventContainer:Regist(Event.Mount_ModelChange, this.Mount_ModelChange)
+    this.eventContainer:Regist(Event.Mount_MoreChange, this.Mount_MoreChange)
+
+    this.eventContainer:Regist(Event.Task_StateChange,this.TaskStateChange)
+    this.eventContainer:Regist(Event.Task_Update, this.TaskStateChange)
+
+    this.eventContainer:Regist(Event.Role_MyLvChanged, this.MyLevelChanged)
+    this.eventContainer:Regist(Event.Role_OnArrive, this.RoleOnArrive)
+    this.eventContainer:Regist(Event.Role_ChangePos,this.RoleOnArrive)
+    this.eventContainer:Regist(Event.CancelClickNpc, this.CancelClickNpc)
+
+    this.eventContainer:Regist(Event.Role_OnAuctionEnterView, this.OnAuctionEnterView)
+end
+
+function RoleManager.MyLevelChanged()
+    if RoleManager.me then
+        RoleManager.me:DisplayLevelUpEffect()
+    end
+end
+
+function RoleManager.TaskStateChange()
+    local npcList = { }
+    npcList = RoleManager.GetRoleListByType(ERoleType.NPC)
+    for k, v in pairs(npcList.list) do
+        v:RefushTaskTag()
+    end
+end
+
+function RoleManager.RefreshHeadColor()
+      if roles then
+        for _, role in pairs(roles) do
+            if role then
+                role:InitHeadUI()
+            end
+        end
+    end
+end
+
+function RoleManager.RefreshHeadColorById(roleId)
+    local role = this.GetRoleById(roleId)
+    if role then
+        role:InitHeadUI()
+    end
+end
+
+
+function RoleManager.OnRoleEnterView(_, roleData)
+    if not roleData then
+        return
+    end
+
+    if roleData.roleType == ERoleType.Player then
+        this.CreatePlayer(roleData)
+    elseif roleData.roleType == ERoleType.NPC then
+        this.CreateNpc(roleData)
+    elseif roleData.roleType == ERoleType.Monster then
+        this.CreateMonster(roleData)
+    end
+    -- BuffMgr.RoleEnterView(roleData.data.buff, roleData.id)
+end
+
+function RoleManager.OnAuctionEnterView(_,auctionData)
+    if(roles[auctionData.id]) then
+        --logError(string.format('玩家商店%d已在视野内,再次进入了视野',playerData.id))
+        return
+    end
+    local role = ShopRole(auctionData)
+    roles[auctionData.id] = role
+end
+
+function RoleManager.OnRoleLeaveView(_, roleData)
+    if not roleData then
+        return
+    end
+    this.DestroyRole(roleData.id)
+end
+
+function RoleManager.OnRefreshRoleData(_, roleData)
+    local role = this.GetRoleById(roleData.id)
+    if role then
+        role:RefreshRoleInfo(roleData)
+    end
+end
+
+function RoleManager.OnRoleServerPosChanged(_, eventArgs)
+    local role = roles[eventArgs.roleId]
+    if not role then
+        --logError('视野问题','OnRoleServerPosChanged改变服务器坐标失败,角色不存在')
+        return
+    end
+    role:ChangePos(eventArgs.moveType, eventArgs.changePosReason, eventArgs.reasonParam,eventArgs.moveSpeed)
+    EventManager.Dispatch(Event.Role_PlayerChangePos,eventArgs.roleId,eventArgs.changePosReason,eventArgs.reasonParam,eventArgs.moveSpeed)
+end
+
+function RoleManager.OnChangeScene(_,data)
+    this.me:StopMove()
+end
+
+function RoleManager.OnRoleHpChanged(_,hpData)
+    local role = this.GetRoleById(hpData.roleId)
+    if role then
+        role:RefreshHp()
+    elseif hpData.newHp == 0 then
+        -- logError("HP为0，且视野内无法找到该对象")
+    end
+end
+
+function RoleManager.OnRoleMpChanged(_,roleId)
+    local role = this.GetRoleById(roleId)
+    if role then
+        role:RefreshMp()
+    end
+end
+
+function RoleManager.OnRoleShieldChanged(_,ShieldData)
+    local role = this.GetRoleById(ShieldData.roleId)
+    if role then
+        role:RefreshShield()
+    end
+end
+
+function RoleManager.OnRoleMaxTempShieldChanged(_,MaxTempShieldData)
+    local role = this.GetRoleById(MaxTempShieldData.roleId)
+    if role then
+        role:RefreshMaxTempShield()
+    end
+end
+
+function RoleManager.OnRoleTempShieldChanged(_,TempShieldData)
+    local role = this.GetRoleById(TempShieldData.roleId)
+    if role then
+        role:RefreshTempShield()
+    end
+end
+
+function RoleManager.OnRoleMountMaxHPChanged(_,data)
+    local role = this.GetRoleById(data.id)
+    if role then
+        role:RefreshMountHP()
+    end
+end
+
+function RoleManager.OnRoleMountHPChanged(_,data)
+    local role = this.GetRoleById(data.id)
+    if role then
+        role:RefreshMountHP()
+    end
+end
+
+function RoleManager.OnRoleNameChanged(_,role)
+    local role = this.GetRoleById(role.roleId)
+    if role then
+        role:RefreshName(role.name,nil)
+    end
+end
+
+function RoleManager.OnRoleRefreshUnion(_,role)
+    local role = this.GetRoleById(role.info.roleId)
+    if role then
+        role:RefreshUnion()
+    end
+end
+
+function RoleManager.Mount_ModelChange(_,data)
+    local role = this.GetRoleById(data.roleId)
+    if role then
+        if MountUtility.GetrideBlackHorseState(data.rideBlackHorse) and role:IsRenewalDarkHorseMount(true) and not role:IsRidingModelDarkHorseMountFunII() then
+            role:DarkHorseMountSmokeEffect()
+        else
+            if (not role.data.rideMount or role.data.rideMount.bagGridIndex ~= MountPos.pos1)
+                    and role:IsRidingModelDarkHorseMountFunII()
+                    and role:IsRenewalDarkHorseMount(true) then
+                role:DarkHorseMountSmokeEffect()
+            end
+        end
+        role:RefreshMount()
+    end
+end
+
+function RoleManager.Mount_MoreChange(_,data)
+    if RoleManager.me then
+        RoleManager.me:InitHeadUI()
+        RoleManager.me:InitMountHeadUI()
+    end
+end
+
+function RoleManager.IsOverLimitPos(limitPosTab, pos)
+    if pos.x > limitPosTab.minPosX and pos.x < limitPosTab.maxPosX
+            and pos.y > limitPosTab.minPosY and pos.x < limitPosTab.maxPosY then
+        return true
+    end
+    return false
+end
+
+function RoleManager.TouchInit()
+    RoleTouch.Init()
+end
+
+function RoleManager.GetRoleMeOnLineTime() --毫秒
+    local currentLoginTime = Time.unscaledTime - this.me.data.roleLoginUnscaleTime
+    return (this.me.data.dailyOnlineTime + currentLoginTime*1000)
+end
+
+function RoleManager.GetRoleMeAllLineTime() --毫秒
+    local currentLoginTime = Time.unscaledTime - this.me.data.roleLoginUnscaleTime
+    return (this.me.data.userOnLineTime + currentLoginTime*1000)
+end
+
+--region Roles getters
+
+function RoleManager.GetRoleById(roleId)
+    return roles[roleId]
+end
+
+function RoleManager.HideHpBar(bShow)
+    for i, v in pairs(roles) do
+        if(v and v.isMe) then
+            if(v.Head) then
+                v.Head:ShowHpHead(bShow)
+            end
+        end
+    end
+end
+
+
+function RoleManager.GetMonsterByMonsterType(typeList,range)
+    local monsterList = { }
+    for k, v in pairs(roles) do
+        if v and v.RoleType ==  ERoleType.Monster and not v.isMe and  v.hp > 0 then
+            for l,t in pairs(typeList) do
+                if v.monsterType == tonumber(t) then
+                    if range~=nil and range > 0 then
+                        if PathFinderManager.pathFinding.IsReachPoint(v.cellPos,range) then
+                            table.insert(monsterList,v)
+                        end
+                    else
+                        table.insert(monsterList,v)
+                    end
+                end
+            end
+        end
+    end
+    return monsterList
+end
+
+function RoleManager.GetMonsterByMonsterType2(monsterList,typeList,range)
+    for k, v in pairs(roles) do
+        if v and v.RoleType ==  ERoleType.Monster and not v.isMe and  v.hp > 0 then
+            for l,t in pairs(typeList) do
+                if v.monsterType == tonumber(t) then
+                    if range~=nil and range > 0 then
+                        if PathFinderManager.pathFinding.IsReachPoint(v.cellPos,range) then
+                            table.insert(monsterList,v)
+                        end
+                    else
+                        table.insert(monsterList,v)
+                    end
+                end
+            end
+        end
+    end
+end
+
+function RoleManager.GetMonsterRoleByConfigId(configIdList,range)
+    local monsterList = { }
+    for k, v in pairs(roles) do
+        if v and v.RoleType ==  ERoleType.Monster and not v.isMe and  v.hp > 0 then
+            for l,t in pairs(configIdList) do
+                if v:GetConfigId() == tonumber(t) then
+                    if range~=nil and range>0 then
+                        if PathFinderManager.pathFinding.IsReachPoint(v.cellPos,range) then
+                            table.insert(monsterList,v)
+                        end
+                    else
+                        table.insert(monsterList,v)
+                    end
+                end
+            end
+        end
+    end
+    return monsterList
+end
+
+function RoleManager.GetRolesByUnionId(unionId,roleType)
+    if(unionId == nil or unionId == 0) then
+        return {}
+    end
+    local result = {}
+    for _, v in pairs(roles) do
+        if(not v.isMe and v.unionId == unionId and v.data.roleType == roleType) then
+            result[v.id] = v
+        end
+    end
+    return result
+end
+
+function RoleManager.GetRoleByModel(modelObj)
+    local objName = modelObj.name
+    for k, v in pairs(roles) do
+        if tostring(v.data.id) == objName then
+            return v
+        end
+    end
+end
+
+function RoleManager.GetRoleListByType(roleType)
+    local targetGroup = List:New()
+    for _, v in pairs(roles) do
+        if v and v.RoleType ==  roleType and not v.isMe then
+            targetGroup:Add(v)
+        end
+    end
+    return targetGroup
+end
+
+function RoleManager.GetRolesByType(roleType)
+    local targetGroup = {}
+    for _, v in pairs(roles) do
+        if v and v.RoleType ==  roleType and not v.isMe then
+            targetGroup[v.id] = v
+        end
+    end
+    return targetGroup
+end
+
+function RoleManager.GetRolesByTypeAndRange(roleType,range)
+    local targetGroup = List:New()
+    for _, v in pairs(roles) do
+        if v and v.RoleType ==  roleType and not v.isMe  then
+            local distance = Vector3.Distance(v.pos,RoleManager.me.pos)
+            if distance <= range then
+                targetGroup:Add(v)
+            end
+        end
+    end
+    return targetGroup
+end
+
+function RoleManager.GetRoleInCell(cell)
+    local targetGroup = {}
+    for _, v in pairs(roles) do
+        if v  then
+            if not v.isMe and v.cellPos.x == cell.x and v.cellPos.y == cell.y then
+                table.insert(targetGroup,v)
+            end
+        end
+    end
+    return targetGroup
+end
+
+function RoleManager.GetRolesByTypeAndRangeAlive(roleTypes, range, callback)
+    local rolesTypeMap = {}
+    if type(roleTypes) == "table" then
+        for i, v in pairs(roleTypes) do
+            rolesTypeMap[v] = true
+        end
+    else
+        rolesTypeMap[roleTypes] = true
+    end
+    local targetGroup = {}
+    local distance
+    local meCell = RoleManager.me.serverCoord
+    for _, v in pairs(roles) do
+        if v and rolesTypeMap[v.RoleType] and v.hp > 0 and not v.isMe and v:CanSelect() then
+            if callback then
+                if callback(v) then
+                    distance = Mathf.Max(Mathf.Abs(v.serverCoord.x - meCell.x), Mathf.Abs(v.serverCoord.y - meCell.y))
+                    if distance <= range then
+                        v.tempPathFindingDistance = distance
+                        table.insert(targetGroup, v)
+                    end
+                end
+            else
+                distance = Mathf.Max(Mathf.Abs(v.serverCoord.x - meCell.x), Mathf.Abs(v.serverCoord.y - meCell.y))
+                if distance <= range then
+                    v.tempPathFindingDistance = distance
+                    table.insert(targetGroup, v)
+                end
+            end
+        end
+    end
+    return targetGroup
+end
+
+function RoleManager.GetRolesByTypeAndRangeAliveHook(roleTypes, hookPos, range, callback)
+    local rolesTypeMap = {}
+    if type(roleTypes) == "table" then
+        for i, v in pairs(roleTypes) do
+            rolesTypeMap[v] = true
+        end
+    else
+        rolesTypeMap[roleTypes] = true
+    end
+    local targetGroup = {}
+    local distance
+    local meCell = RoleManager.me.serverCoord
+    for _, v in pairs(roles) do
+        if v and rolesTypeMap[v.RoleType] and v.hp > 0 and not v.isMe and v:CanSelect() then
+            if callback then
+                if callback(v) then
+                    distance = Mathf.Max(Mathf.Abs(v.serverCoord.x - meCell.x), Mathf.Abs(v.serverCoord.y - meCell.y))
+                    if distance <= range and OnHookData.TargetCellIsInTheHookRange(v.serverCoord, hookPos) then
+                        v.tempPathFindingDistance = distance
+                        table.insert(targetGroup, v)
+                    end
+                end
+            else
+                distance = Mathf.Max(Mathf.Abs(v.serverCoord.x - meCell.x), Mathf.Abs(v.serverCoord.y - meCell.y))
+                if distance <= range and OnHookData.TargetCellIsInTheHookRange(v.serverCoord, hookPos) then
+                    v.tempPathFindingDistance = distance
+                    table.insert(targetGroup, v)
+                end
+            end
+        end
+    end
+    return targetGroup
+end
+
+function RoleManager.RefreshAllCell()
+    for i, v in pairs(roles) do
+        v:SetCell(v.cellPos.x, v.cellPos.y)
+    end
+end
+--如果自己是乘客,需要返回车主role
+function RoleManager.GetHostRole(role)
+    local role = role
+    if not role.data.multiPlayersMountOwner and role.data.rideMultiPlayersMount then
+        for i, v in pairs(role.data.multiPlayers) do
+            role = RoleManager.GetRoleById(v)
+        end
+    end
+    return role
+end
+--endregion
+
+
+RoleManager.Init()
